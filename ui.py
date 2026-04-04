@@ -2,11 +2,18 @@
 This module is UI-only: it builds the Tkinter widgets and wires them to the
 message queue and kitchen worker. Business logic and queue behavior live in
 their respective modules (`order.py`, `message_queue.py`, `kitchen.py`).
+
+Enhancements:
+- Numeric keypad for table input
+- Interactive dish buttons in a grid
+- A "Current Order" cart allowing multiple dishes to be batched
+  and submitted together.
 """
 
 import tkinter as tk
 from tkinter import messagebox, ttk
 import queue
+from typing import List, Optional
 
 from order import Order
 from message_queue import BasicMessageQueue
@@ -37,6 +44,11 @@ class RestaurantOrderApp:
             order_done_callback=self._schedule_order_done,
         )
 
+        # UI state
+        self.cart: List[str] = []  # temporary cart for current table
+        self.table_buffer: str = ""  # digits entered via keypad
+        self.selected_table: Optional[str] = None  # confirmed table number
+
         # Build UI
         self.setup_customer_ui()
         self.setup_kitchen_ui()
@@ -49,17 +61,40 @@ class RestaurantOrderApp:
         self.update_queue_depth()
 
     def setup_customer_ui(self) -> None:
+        """Build the left-side customer/order UI with keypad, menu, and cart."""
         frame = ttk.LabelFrame(self.root, text="Place Order (Customer App)")
         frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-        ttk.Label(frame, text="Table Number:").pack(pady=2)
-        self.table_entry = ttk.Entry(frame)
-        self.table_entry.pack(pady=5)
+        # Table display (shows entered digits)
+        ttk.Label(frame, text="Table Number:").grid(row=0, column=0, columnspan=3, pady=2)
+        self.table_var = tk.StringVar(value="")
+        self.table_display = ttk.Label(frame, textvariable=self.table_var, relief="sunken", width=18, anchor="center")
+        self.table_display.grid(row=1, column=0, columnspan=3, pady=5)
 
-        ttk.Label(frame, text="Select Dish:").pack(pady=2)
-        self.dish_var = tk.StringVar()
-        self.dish_box = ttk.Combobox(frame, textvariable=self.dish_var)
-        self.dish_box["values"] = (
+        # Numeric keypad (3x4)
+        keypad_frame = ttk.Frame(frame)
+        keypad_frame.grid(row=2, column=0, columnspan=3, pady=5)
+
+        keys = [
+            ("1", 0, 0), ("2", 0, 1), ("3", 0, 2),
+            ("4", 1, 0), ("5", 1, 1), ("6", 1, 2),
+            ("7", 2, 0), ("8", 2, 1), ("9", 2, 2),
+            ("Clear", 3, 0), ("0", 3, 1), ("Enter", 3, 2),
+        ]
+
+        for (label, r, c) in keys:
+            btn = ttk.Button(keypad_frame, text=label, command=lambda t=label: self._on_keypad(t))
+            btn.grid(row=r, column=c, ipadx=10, ipady=8, padx=3, pady=3, sticky="nsew")
+
+        for i in range(3):
+            keypad_frame.grid_columnconfigure(i, weight=1)
+
+        # Menu (grid of dish buttons)
+        ttk.Label(frame, text="Menu:").grid(row=3, column=0, columnspan=3, pady=(10, 2))
+        menu_frame = ttk.Frame(frame)
+        menu_frame.grid(row=4, column=0, columnspan=3)
+
+        self.menu_items = [
             "Pepperoni Pizza",
             "Hawaiian Deluxe",
             "All-Meat Pizza",
@@ -68,10 +103,29 @@ class RestaurantOrderApp:
             "Veggie Burger",
             "Caesar Salad",
             "Pasta Carbonara",
-        )
-        self.dish_box.pack(pady=5)
+        ]
 
-        ttk.Button(frame, text="Send to Kitchen", command=self.place_order).pack(pady=10)
+        # Create dish buttons in a 2-column grid for easy tapping
+        for idx, dish in enumerate(self.menu_items):
+            r = idx // 2
+            c = idx % 2
+            b = ttk.Button(menu_frame, text=dish, command=lambda d=dish: self._on_dish_click(d))
+            b.grid(row=r, column=c, padx=4, pady=4, sticky="nsew", ipadx=6, ipady=8)
+
+        for j in range(2):
+            menu_frame.grid_columnconfigure(j, weight=1)
+
+        # Cart (current order) listbox
+        ttk.Label(frame, text="Current Order (Cart):").grid(row=5, column=0, columnspan=3, pady=(10, 2))
+        self.cart_listbox = tk.Listbox(frame, width=30, height=6)
+        self.cart_listbox.grid(row=6, column=0, columnspan=3, pady=(0, 5))
+
+        # Cart actions: submit, clear, remove selected
+        cart_btn_frame = ttk.Frame(frame)
+        cart_btn_frame.grid(row=7, column=0, columnspan=3, pady=6)
+        ttk.Button(cart_btn_frame, text="Submit Order", command=self.submit_cart).pack(side="left", padx=6)
+        ttk.Button(cart_btn_frame, text="Clear Cart", command=self.clear_cart).pack(side="left", padx=6)
+        ttk.Button(cart_btn_frame, text="Remove Selected", command=self.remove_selected_cart_item).pack(side="left", padx=6)
 
     def setup_kitchen_ui(self) -> None:
         frame = ttk.LabelFrame(self.root, text="Kitchen Monitor")
@@ -101,33 +155,127 @@ class RestaurantOrderApp:
         )
         ttk.Label(frame, textvariable=self.status_var).pack(side="left", padx=20, pady=6)
 
-    def place_order(self) -> None:
-        """Create an Order and send it to the queue.
+    # -------------------- Cart & Keypad Handlers --------------------
+    def _on_keypad(self, key: str) -> None:
+        """Handle keypad presses: digits, Clear, and Enter."""
+        if key == "Clear":
+            self.table_buffer = ""
+            self.selected_table = None
+            self.table_var.set("")
+        elif key == "Enter":
+            if not self.table_buffer:
+                messagebox.showwarning("Input Error", "Please enter a table number first.")
+                return
+            # Confirm the table number
+            self.selected_table = self.table_buffer
+            messagebox.showinfo("Table Selected", f"Table {self.selected_table} selected")
+        else:
+            # Append digit
+            if len(self.table_buffer) < 4:  # limit length for sanity
+                self.table_buffer += key
+                self.table_var.set(self.table_buffer)
 
-        Uses `queue.Full` handling to alert the user when the kitchen is at
-        capacity.
+    def _on_dish_click(self, dish: str) -> None:
+        """Add the tapped dish to the temporary cart list."""
+        self.cart.append(dish)
+        self._update_cart_listbox()
+
+    def _update_cart_listbox(self) -> None:
+        """Refresh the cart listbox to reflect `self.cart`."""
+        self.cart_listbox.delete(0, tk.END)
+        for item in self.cart:
+            self.cart_listbox.insert(tk.END, item)
+
+    def remove_selected_cart_item(self) -> None:
+        """Remove the selected item from the cart listbox and state."""
+        sel = self.cart_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        try:
+            del self.cart[idx]
+        except IndexError:
+            return
+        self._update_cart_listbox()
+
+    def clear_cart(self) -> None:
+        """Clear the current cart contents."""
+        self.cart.clear()
+        self._update_cart_listbox()
+
+    def submit_cart(self) -> None:
+        """Attempt to submit all cart items as separate `Order`s to the queue.
+
+        Handles `queue.Full` by preserving unsent items in the cart and
+        warning the user if the kitchen is overwhelmed.
         """
-        table = self.table_entry.get().strip()
-        dish = self.dish_var.get()
+        # Determine table number: prefer confirmed selection, fall back to buffer
+        table = self.selected_table or self.table_buffer
+        if not table:
+            messagebox.showwarning("Input Error", "Please set a table number using the keypad (press Enter).")
+            return
 
-        if not table or not dish:
+        if not self.cart:
+            messagebox.showwarning("Cart Empty", "No dishes selected. Tap dishes to add them to the cart.")
+            return
+
+        remaining: List[str] = []
+        sent_count = 0
+        for idx, dish in enumerate(self.cart):
+            order = Order(dish=dish, table_number=table)
+            try:
+                self.queue.send(sender=order.sender, body=order)
+                # Add to pending listbox so UI shows the order is queued
+                self.kitchen_list.insert(tk.END, order.description)
+                sent_count += 1
+            except queue.Full:
+                # Kitchen can't accept more; preserve remaining items
+                remaining = self.cart[idx:]
+                messagebox.showwarning("Kitchen Full", "Kitchen is overwhelmed. Some items remain in your cart.")
+                break
+
+        # Update cart state to whatever couldn't be sent
+        self.cart = remaining
+        self._update_cart_listbox()
+
+        # If everything sent, optionally clear the table buffer/selection
+        if not self.cart and sent_count > 0:
+            # clear table so next order requires explicit entry
+            self.table_buffer = ""
+            self.selected_table = None
+            self.table_var.set("")
+
+    # -------------------- Existing helpers (status / callbacks) --------------------
+    def place_order(self) -> None:
+        # Legacy single-order path retained for compatibility (not used by new UI)
+        table = self.table_buffer.strip() or (self.selected_table or "")
+        if not table:
             messagebox.showwarning("Input Error", "Please enter Table and Dish!")
+            return
+
+        # If dish is present in a combobox (legacy) handle it; otherwise the
+        # modern UI uses cart/submit_cart instead.
+        try:
+            dish = self.dish_var.get()
+        except Exception:
+            dish = None
+
+        if not dish:
+            messagebox.showwarning("Input Error", "Please select a dish or use the cart.")
             return
 
         order = Order(dish=dish, table_number=table)
         try:
-            # Body is the Order instance; kitchen expects Order objects
             self.queue.send(sender=order.sender, body=order)
         except queue.Full:
-            messagebox.showwarning(
-                "Kitchen Full",
-                "Kitchen is overwhelmed. Please wait before sending more orders.",
-            )
+            messagebox.showwarning("Kitchen Full", "Kitchen is overwhelmed. Please wait before sending more orders.")
             return
 
-        # Add pending entry to the listbox using the human-friendly description
         self.kitchen_list.insert(tk.END, order.description)
-        self.table_entry.delete(0, tk.END)
+        # reset table buffer/selection after single-send
+        self.table_buffer = ""
+        self.selected_table = None
+        self.table_var.set("")
 
     def peek_order(self) -> None:
         """Show a preview of the next queued order without dequeuing it."""
