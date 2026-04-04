@@ -3,6 +3,7 @@ from tkinter import messagebox, ttk
 import threading
 import queue
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 """ GROUP 1: JAZL
@@ -24,13 +25,19 @@ class BasicMessageQueue:
         self._queue = queue.Queue(maxsize=maxsize)
         self._lock  = threading.Lock()
 
-    # sends order to kitchen ( produces a message into the queue)
+    # Sends order to kitchen ( produces a message into the queue)
     def send(self, sender: str, body: Any) -> None:
         """Producer sends a message. Non-blocking."""
-        self._queue.put({"sender": sender, "body": body})
-        print(f"  [SEND] '{self.name}' got order: '{body}' from {sender}")
+        try:
+            # Use non-blocking put so caller can handle a full queue explicitly
+            self._queue.put({"sender": sender, "body": body}, block=False)
+            print(f"  [SEND] '{self.name}' got order: '{body}' from {sender}")
+        except queue.Full:
+            # Inform caller that the queue is full so UI can react
+            print(f"  [SEND] '{self.name}' is full; cannot accept order from {sender}")
+            raise
 
-    # kitchen worker thread calls receive to get next order (consumes a message from the queue)
+    # Kitchen worker thread calls receive to get next order (consumes a message from the queue)
     def receive(self, timeout: float = 3.0) -> Optional[Dict]:
         """Consumer extracts (destructive) the next message. Blocking."""
         try:
@@ -41,16 +48,28 @@ class BasicMessageQueue:
             print(f"  [RECEIVE] '{self.name}' no orders to process (queue is empty)")
             return None
         
-    # shows next order without removing it from the queue
+    # Shows next order without removing it from the queue
     def peek(self) -> Optional[Dict]:
         """Look at next message without removing it."""
         with self._lock:
-            if not self._queue.empty():
+            try:
+                # Accessing the underlying deque is generally discouraged, but
+                # it's acceptable here if wrapped in exception handling.
                 msg = self._queue.queue[0]
-                print(f"  [PEEK] '{self.name}' next: {msg['body']} (from {msg['sender']})")
+                body = msg.get('body') if isinstance(msg, dict) else msg
+                sender = msg.get('sender') if isinstance(msg, dict) else None
+                # Normalize body display if it's a dict (our orders will be dicts)
+                display = body.get('dish') if isinstance(body, dict) else body
+                print(f"  [PEEK] '{self.name}' next: {display} (from {sender})")
                 return msg
-        print(f"  [PEEK] '{self.name}' is empty")
-        return None
+            except IndexError:
+                # Queue is empty
+                print(f"  [PEEK] '{self.name}' is empty")
+                return None
+            except Exception as e:
+                # Any unexpected error should be handled gracefully
+                print(f"  [PEEK] '{self.name}' peek error: {e}")
+                return None
 
     def size(self) -> int:
         return self._queue.qsize()
@@ -76,7 +95,9 @@ class RestaurantOrderApp:
         self.setup_queue_status_ui()  # queue depth counter
 
         self.running = True
-        self.processor_thread = threading.Thread(target=self.kitchen_worker, daemon=True)
+        self.shutdown_event = threading.Event()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.processor_thread = threading.Thread(target=self.kitchen_worker)
         self.processor_thread.start()
 
         self.update_queue_depth()
@@ -142,49 +163,108 @@ class RestaurantOrderApp:
         dish  = self.dish_var.get()
 
         if table and dish:
-            self.queue.send(sender=f"Table {table}", body=dish)
-            self.kitchen_list.insert(tk.END, f"{dish} — Table {table}")
+            order_id = uuid.uuid4().hex[:8]
+            try:
+                # Send a structured order (dish + unique id)
+                self.queue.send(sender=f"Table {table}", body={"dish": dish, "id": order_id})
+            except queue.Full:
+                messagebox.showwarning("Kitchen Full", "Kitchen is overwhelmed. Please wait before sending more orders.")
+                return
+
+            # Insert pending order with the unique id to ensure removals are unambiguous
+            self.kitchen_list.insert(tk.END, f"{dish} — Table {table} [#{order_id}]")
             self.table_entry.delete(0, tk.END)
         else:
             messagebox.showwarning("Input Error", "Please enter Table and Dish!")
 
     def kitchen_worker(self):
         """Runs in a background thread. Pulls orders and simulates cooking."""
-        while self.running:
+        while self.running and not self.shutdown_event.is_set():
             order = self.queue.receive(timeout=1.0)
             if order:
-                dish   = order['body']
-                sender = order['sender']
+                body   = order.get('body')
+                sender = order.get('sender')
+
+                # Body may be a dict with dish and id
+                if isinstance(body, dict):
+                    dish = body.get('dish')
+                    order_id = body.get('id')
+                else:
+                    dish = body
+                    order_id = None
 
                 # Mark kitchen as busy
-                self.root.after(0, lambda d=dish: self.status_var.set(f"Kitchen: cooking {d}…"))
+                self._safe_after(0, lambda d=dish: self.status_var.set(f"Kitchen: cooking {d}…"))
 
-                # imulate cooking time
+                # Simulate cooking time
                 time.sleep(self.PROCESSING_DELAY)
 
                 # Move order from pending to processed 
-                self.root.after(0, lambda d=dish, s=sender: self._mark_order_done(d, s))
+                self._safe_after(0, lambda d=dish, s=sender, oid=order_id: self._mark_order_done(d, s, oid))
             else:
                 # empty queue, mark kitchen as idle
-                self.root.after(0, lambda: self.status_var.set("Kitchen: idle"))
+                self._safe_after(0, lambda: self.status_var.set("Kitchen: idle"))
 
-    def _mark_order_done(self, dish: str, sender: str):
-        """Called on the main thread. Removes from pending list, adds to processed."""
-        # Remove the first matching entry in the pending list
+    def _safe_after(self, delay: int, callback, *args, **kwargs):
+        """Schedule a Tk callback only if the UI is still alive."""
+        if self.running and self.root.winfo_exists():
+            try:
+                self.root.after(delay, callback, *args, **kwargs)
+            except RuntimeError:
+                # If the UI has already started shutting down, ignore safely.
+                pass
+
+    def _mark_order_done(self, dish: str, sender: str, order_id: Optional[str] = None):
+        """Called on the main thread. Removes from pending list, adds to processed.
+
+        If `order_id` is provided, remove the exact pending entry containing that id
+        to avoid removing duplicates with the same dish/sender text.
+        """
+        # Remove the pending item using the unique id when available
         for i in range(self.kitchen_list.size()):
-            if dish in self.kitchen_list.get(i) and sender.replace("Table ", "") in self.kitchen_list.get(i):
-                self.kitchen_list.delete(i)
-                break
+            item = self.kitchen_list.get(i)
+            if order_id:
+                if f"[#{order_id}]" in item:
+                    self.kitchen_list.delete(i)
+                    break
+            else:
+                # Fallback to the previous heuristic when no id is present
+                if dish in item and sender.replace("Table ", "") in item:
+                    self.kitchen_list.delete(i)
+                    break
 
-        self.processed_list.insert(tk.END, f"{dish} — {sender}")
-        self.processed_list.see(tk.END) 
+        # Append to processed list (include id when available)
+        if order_id:
+            self.processed_list.insert(tk.END, f"{dish} — {sender} [#{order_id}]")
+        else:
+            self.processed_list.insert(tk.END, f"{dish} — {sender}")
+        self.processed_list.see(tk.END)
 
     def peek_order(self):
         msg = self.queue.peek()
         if msg:
-            self.peek_var.set(f"Next up: {msg['body']} — {msg['sender']}")
+            body = msg.get('body') if isinstance(msg, dict) else msg
+            sender = msg.get('sender') if isinstance(msg, dict) else None
+            if isinstance(body, dict):
+                dish = body.get('dish')
+                order_id = body.get('id')
+                if order_id:
+                    self.peek_var.set(f"Next up: {dish} — {sender} [#{order_id}]")
+                else:
+                    self.peek_var.set(f"Next up: {dish} — {sender}")
+            else:
+                self.peek_var.set(f"Next up: {body} — {sender}")
         else:
             self.peek_var.set("Queue is empty.")
+
+    def on_close(self):
+        """Graceful shutdown: stop worker thread then destroy window."""
+        self.running = False
+        self.shutdown_event.set()
+        # Give the worker a short time to finish current work and exit
+        if hasattr(self, 'processor_thread') and self.processor_thread.is_alive():
+            self.processor_thread.join(timeout=5.0)
+        self.root.destroy()
 
     # Updates the queue depth display every 500ms
     def update_queue_depth(self):
