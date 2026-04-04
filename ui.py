@@ -205,7 +205,7 @@ class RestaurantOrderApp:
             frame,
             textvariable=self.peek_var,
             style="Queue.TLabel",
-            width=36,
+            width=64,
             anchor="w",
             justify="left",
             wraplength=300,
