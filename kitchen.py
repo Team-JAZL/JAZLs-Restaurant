@@ -32,11 +32,13 @@ class KitchenWorker:
         processing_delay: float = 10.0,
         status_callback: Optional[Callable[[str], None]] = None,
         order_done_callback: Optional[Callable[[Order], None]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ):
         self.order_queue = order_queue
         self.processing_delay = processing_delay
         self.status_callback = status_callback
         self.order_done_callback = order_done_callback
+        self.progress_callback = progress_callback
         self.running = False
         self.shutdown_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
@@ -66,16 +68,27 @@ class KitchenWorker:
                     continue
 
                 # Notify observers that the kitchen is busy
-                self._notify_status(f"Kitchen: cooking {body.dish}…")
+                self._notify_status(f"🍕 Cooking {body.dish}…")
+                self._notify_progress(0.0)
 
-                # Simulate the cooking time (blocking sleep on worker thread)
-                time.sleep(self.processing_delay)
+                # Simulate the cooking time in smaller increments and report progress
+                total_seconds = max(self.processing_delay, 0.5)
+                step = 0.25
+                elapsed = 0.0
+                while self.running and elapsed < total_seconds and not self.shutdown_event.is_set():
+                    time.sleep(step)
+                    elapsed += step
+                    progress = min(1.0, elapsed / total_seconds)
+                    self._notify_progress(progress)
+
+                self._notify_progress(1.0)
 
                 # Notify that the order is done
                 self._notify_order_done(body)
             else:
                 # No orders; report idle state
-                self._notify_status("Kitchen: idle")
+                self._notify_status("🌿 Idle")
+                self._notify_progress(0.0)
 
     def _notify_status(self, status: str) -> None:
         """Invoke the status callback if provided."""
@@ -91,5 +104,13 @@ class KitchenWorker:
         if callable(self.order_done_callback):
             try:
                 self.order_done_callback(order)
+            except Exception:
+                pass
+
+    def _notify_progress(self, progress: float) -> None:
+        """Invoke the progress callback with a float between 0.0 and 1.0."""
+        if callable(self.progress_callback):
+            try:
+                self.progress_callback(progress)
             except Exception:
                 pass

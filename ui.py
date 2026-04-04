@@ -32,7 +32,35 @@ class RestaurantOrderApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("JAZL's Pizzeria: Order System")
+        self.root.title("JAZL's Pizzeria: POS")
+        self.root.geometry("640x480")
+        self.root.minsize(640, 480)
+        self.root.configure(bg="#fff8f2")
+
+        # Style setup for a pastel pizzeria palette
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.style.configure("TFrame", background="#fff8f2")
+        self.style.configure("TLabel", background="#fff8f2", font=("Segoe UI", 9))
+        self.style.configure("TLabelframe", background="#fff8f2")
+        self.style.configure("TLabelframe.Label", font=("Segoe UI Semibold", 13, "bold"), foreground="#a8573b")
+        self.style.configure("Header.TLabel", font=("Segoe UI Semibold", 12, "bold"), foreground="#8b4c39", background="#ffe8dd")
+        self.style.configure("Accent.TLabel", font=("Segoe UI", 9, "bold"), foreground="#ba6f52", background="#fff8f2")
+        self.style.configure("Queue.TLabel", font=("Segoe UI", 10, "bold"), foreground="#6e4131", background="#fff8f2")
+        self.style.configure("Order.TButton", font=("Segoe UI", 9, "bold"), foreground="#6e4b3c", relief="flat", padding=6)
+        self.style.map("Order.TButton", background=[("active", "#ffd8c2"), ("pressed", "#e9a87f")])
+        self.style.configure("Action.TButton", font=("Segoe UI", 9, "bold"), foreground="#ffffff", background="#d9735f", relief="flat", padding=6)
+        self.style.map("Action.TButton", background=[("active", "#ffb59a"), ("pressed", "#d1563f")])
+        self.style.configure("Kitchen.Horizontal.TProgressbar", troughcolor="#ffe6d8", background="#d9735f", thickness=12)
+        self.style.configure("Card.TLabel", font=("Segoe UI", 10, "bold"), background="#ffece6", foreground="#8e4d3f")
+
+        # Responsive root grid with left quarter and right three-quarters
+        self.root.columnconfigure(0, weight=1, minsize=160)
+        self.root.columnconfigure(1, weight=3)
+        self.root.rowconfigure(0, weight=1)
 
         # Message queue used to communicate with the kitchen worker
         self.queue = BasicMessageQueue("KitchenOrders", maxsize=self.QUEUE_MAX_SIZE)
@@ -42,12 +70,14 @@ class RestaurantOrderApp:
             processing_delay=10.0,
             status_callback=self._schedule_status_update,
             order_done_callback=self._schedule_order_done,
+            progress_callback=self._schedule_progress_update,
         )
 
         # UI state
         self.cart: List[str] = []  # temporary cart for current table
         self.table_buffer: str = ""  # digits entered via keypad
         self.selected_table: Optional[str] = None  # confirmed table number
+        self.dish_var = tk.StringVar(value="")  # legacy compatibility for single order mode
 
         # Build UI
         self.setup_customer_ui()
@@ -62,18 +92,28 @@ class RestaurantOrderApp:
 
     def setup_customer_ui(self) -> None:
         """Build the left-side customer/order UI with keypad, menu, and cart."""
-        frame = ttk.LabelFrame(self.root, text="Place Order (Customer App)")
-        frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        frame = ttk.LabelFrame(self.root, text="🍕 Place Order")
+        frame.grid(row=0, column=0, padx=10, pady=1, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=0)
 
         # Table display (shows entered digits)
-        ttk.Label(frame, text="Table Number:").grid(row=0, column=0, columnspan=3, pady=2)
+        ttk.Label(frame, text="Table Number:", style="Accent.TLabel").grid(row=0, column=0, columnspan=3, pady=2)
         self.table_var = tk.StringVar(value="")
-        self.table_display = ttk.Label(frame, textvariable=self.table_var, relief="sunken", width=18, anchor="center")
-        self.table_display.grid(row=1, column=0, columnspan=3, pady=5)
+        self.table_display = ttk.Label(
+            frame,
+            textvariable=self.table_var,
+            relief="sunken",
+            width=18,
+            anchor="center",
+            style="Queue.TLabel",
+        )
+        self.table_display.grid(row=1, column=0, columnspan=3, pady=1, sticky="ew")
 
         # Numeric keypad (3x4)
         keypad_frame = ttk.Frame(frame)
-        keypad_frame.grid(row=2, column=0, columnspan=3, pady=5)
+        keypad_frame.grid(row=2, column=0, columnspan=3, pady=1, sticky="nsew")
 
         keys = [
             ("1", 0, 0), ("2", 0, 1), ("3", 0, 2),
@@ -83,16 +123,26 @@ class RestaurantOrderApp:
         ]
 
         for (label, r, c) in keys:
-            btn = ttk.Button(keypad_frame, text=label, command=lambda t=label: self._on_keypad(t))
-            btn.grid(row=r, column=c, ipadx=10, ipady=8, padx=3, pady=3, sticky="nsew")
+            btn_style = "Action.TButton" if label in {"Clear", "Enter"} else "Order.TButton"
+            btn = ttk.Button(keypad_frame, text=label, style=btn_style, command=lambda t=label: self._on_keypad(t))
+            btn.grid(row=r, column=c, ipadx=1, ipady=1, padx=1, pady=1, sticky="nsew")
 
         for i in range(3):
             keypad_frame.grid_columnconfigure(i, weight=1)
+        for i in range(4):
+            keypad_frame.grid_rowconfigure(i, weight=1)
 
-        # Menu (grid of dish buttons)
-        ttk.Label(frame, text="Menu:").grid(row=3, column=0, columnspan=3, pady=(10, 2))
-        menu_frame = ttk.Frame(frame)
-        menu_frame.grid(row=4, column=0, columnspan=3)
+        # Menu (scrollable button grid)
+        ttk.Label(frame, text="Menu:", style="Accent.TLabel").grid(row=3, column=0, columnspan=3, pady=1)
+        menu_canvas = tk.Canvas(frame, bg="#fff8f2", highlightthickness=0, height=240)
+        menu_canvas.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        menu_scrollbar = ttk.Scrollbar(frame, orient="vertical", command=menu_canvas.yview)
+        menu_scrollbar.grid(row=4, column=2, sticky="ns", pady=2)
+        menu_canvas.configure(yscrollcommand=menu_scrollbar.set)
+        frame.rowconfigure(4, weight=1)
+
+        self.menu_inner_frame = ttk.Frame(menu_canvas)
+        self.menu_canvas_window = menu_canvas.create_window((0, 0), window=self.menu_inner_frame, anchor="nw")
 
         self.menu_items = [
             "Pepperoni Pizza",
@@ -105,55 +155,80 @@ class RestaurantOrderApp:
             "Pasta Carbonara",
         ]
 
-        # Create dish buttons in a 2-column grid for easy tapping
         for idx, dish in enumerate(self.menu_items):
             r = idx // 2
             c = idx % 2
-            b = ttk.Button(menu_frame, text=dish, command=lambda d=dish: self._on_dish_click(d))
-            b.grid(row=r, column=c, padx=4, pady=4, sticky="nsew", ipadx=6, ipady=8)
+            b = ttk.Button(self.menu_inner_frame, text=f"🍽️ {dish}", style="Order.TButton", command=lambda d=dish: self._on_dish_click(d))
+            b.grid(row=r, column=c, padx=4, pady=4, sticky="nsew", ipadx=4, ipady=6)
 
         for j in range(2):
-            menu_frame.grid_columnconfigure(j, weight=1)
+            self.menu_inner_frame.grid_columnconfigure(j, weight=1)
+
+        self.menu_inner_frame.update_idletasks()
+        menu_canvas.configure(scrollregion=menu_canvas.bbox("all"))
+        menu_canvas.bind("<Configure>", lambda e: menu_canvas.itemconfig(self.menu_canvas_window, width=e.width))
 
         # Cart (current order) listbox
-        ttk.Label(frame, text="Current Order (Cart):").grid(row=5, column=0, columnspan=3, pady=(10, 2))
-        self.cart_listbox = tk.Listbox(frame, width=30, height=6)
-        self.cart_listbox.grid(row=6, column=0, columnspan=3, pady=(0, 5))
+        ttk.Label(frame, text="Current Order (Cart):", style="Accent.TLabel").grid(row=5, column=0, columnspan=3, pady=(10, 2))
+        self.cart_listbox = tk.Listbox(frame, width=24, height=6, bg="#fff1e6", fg="#4d2600", font=("Segoe UI", 10))
+        self.cart_listbox.grid(row=6, column=0, columnspan=3, pady=(0, 5), sticky="nsew")
+        frame.rowconfigure(6, weight=1)
 
         # Cart actions: submit, clear, remove selected
         cart_btn_frame = ttk.Frame(frame)
-        cart_btn_frame.grid(row=7, column=0, columnspan=3, pady=6)
-        ttk.Button(cart_btn_frame, text="Submit Order", command=self.submit_cart).pack(side="left", padx=6)
-        ttk.Button(cart_btn_frame, text="Clear Cart", command=self.clear_cart).pack(side="left", padx=6)
-        ttk.Button(cart_btn_frame, text="Remove Selected", command=self.remove_selected_cart_item).pack(side="left", padx=6)
+        cart_btn_frame.grid(row=7, column=0, columnspan=3, pady=6, sticky="ew")
+        cart_btn_frame.columnconfigure(0, weight=1)
+        cart_btn_frame.columnconfigure(1, weight=1)
+        cart_btn_frame.columnconfigure(2, weight=1)
+        ttk.Button(cart_btn_frame, text="✅ Submit Order", style="Action.TButton", command=self.submit_cart).grid(row=0, column=0, sticky="ew", padx=4)
+        ttk.Button(cart_btn_frame, text="🗑️ Clear Cart", style="Order.TButton", command=self.clear_cart).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(cart_btn_frame, text="✂️ Remove Selected", style="Order.TButton", command=self.remove_selected_cart_item).grid(row=0, column=2, sticky="ew", padx=4)
 
     def setup_kitchen_ui(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="Kitchen Monitor")
+        frame = ttk.LabelFrame(self.root, text="🍳 Kitchen Monitor")
         frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(3, weight=1)
 
-        ttk.Label(frame, text="Pending Orders:").pack(anchor="w", padx=5)
-        self.kitchen_list = tk.Listbox(frame, width=40, height=8)
-        self.kitchen_list.pack(padx=5, pady=(0, 8))
+        ttk.Label(frame, text="⏳ Pending Orders:", style="Accent.TLabel").grid(row=0, column=0, sticky="w", padx=5)
+        self.kitchen_list = tk.Listbox(frame, width=28, height=6, bg="#fff4e1", fg="#5d4037", font=("Segoe UI", 10))
+        self.kitchen_list.grid(row=1, column=0, padx=5, pady=(0, 8), sticky="nsew")
 
-        ttk.Label(frame, text="Processed Orders:").pack(anchor="w", padx=5)
-        self.processed_list = tk.Listbox(frame, width=40, height=8)
-        self.processed_list.pack(padx=5, pady=(0, 5))
+        ttk.Label(frame, text="✅ Processed Orders:", style="Accent.TLabel").grid(row=2, column=0, sticky="w", padx=5)
+        self.processed_list = tk.Listbox(frame, width=28, height=6, bg="#fffcf5", fg="#4d2600", font=("Segoe UI", 10))
+        self.processed_list.grid(row=3, column=0, padx=5, pady=(0, 5), sticky="nsew")
 
-        ttk.Button(frame, text="See Next Order", command=self.peek_order).pack(pady=(5, 2))
+        ttk.Button(frame, text="👀 See Next Order", style="Order.TButton", command=self.peek_order).grid(row=4, column=0, pady=(5, 2), sticky="ew", padx=5)
         self.peek_var = tk.StringVar(value="Next up: —")
-        ttk.Label(frame, textvariable=self.peek_var, foreground="blue").pack(pady=(0, 5))
+        ttk.Label(
+            frame,
+            textvariable=self.peek_var,
+            style="Queue.TLabel",
+            width=36,
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        ).grid(row=5, column=0, pady=(0, 5), sticky="w", padx=5)
+
+        # Cooking progress bar and label
+        self.progress_bar = ttk.Progressbar(frame, style="Kitchen.Horizontal.TProgressbar", orient="horizontal", mode="determinate", maximum=100)
+        self.progress_bar.grid(row=6, column=0, columnspan=1, padx=5, pady=(5, 2), sticky="ew")
+        self.progress_label = ttk.Label(frame, text="Progress: 0%", style="Queue.TLabel")
+        self.progress_label.grid(row=7, column=0, pady=(2, 5), sticky="e", padx=10)
+        frame.rowconfigure(7, weight=0)
 
     def setup_queue_status_ui(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="Queue Status")
+        frame = ttk.LabelFrame(self.root, text="Order Status")
         frame.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
 
-        self.depth_var = tk.StringVar(value="Queue depth: 0")
-        self.status_var = tk.StringVar(value="Kitchen: idle")
+        self.depth_var = tk.StringVar(value="🧾 Queue depth: 0")
+        self.status_var = tk.StringVar(value="🔥 Kitchen: idle")
 
-        ttk.Label(frame, textvariable=self.depth_var, font=("TkDefaultFont", 11, "bold")).pack(
-            side="left", padx=20, pady=6
-        )
-        ttk.Label(frame, textvariable=self.status_var).pack(side="left", padx=20, pady=6)
+        ttk.Label(frame, textvariable=self.depth_var, style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=20, pady=6)
+        ttk.Label(frame, textvariable=self.status_var, style="Header.TLabel").grid(row=0, column=1, sticky="e", padx=20, pady=6)
 
     # -------------------- Cart & Keypad Handlers --------------------
     def _on_keypad(self, key: str) -> None:
@@ -293,6 +368,16 @@ class RestaurantOrderApp:
     def _schedule_status_update(self, status: str) -> None:
         """Schedule a status update on the UI thread."""
         self._safe_after(0, lambda: self.status_var.set(status))
+
+    def _schedule_progress_update(self, progress: float) -> None:
+        """Schedule a progress bar update on the UI thread."""
+        self._safe_after(0, lambda: self._update_progress(progress))
+
+    def _update_progress(self, progress: float) -> None:
+        """Update the cooking progress bar and label."""
+        pct = int(progress * 100)
+        self.progress_bar['value'] = pct
+        self.progress_label['text'] = f"Progress: {pct}%"
 
     def _schedule_order_done(self, order: Order) -> None:
         """Schedule the UI update to mark an order done."""
