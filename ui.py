@@ -69,6 +69,7 @@ class RestaurantOrderApp:
             order_queue=self.queue,
             processing_delay=10.0,
             status_callback=self._schedule_status_update,
+            order_started_callback=self._schedule_current_order_update,
             order_done_callback=self._schedule_order_done,
             progress_callback=self._schedule_progress_update,
         )
@@ -201,22 +202,19 @@ class RestaurantOrderApp:
 
         ttk.Button(frame, text="👀 See Next Order", style="Order.TButton", command=self.peek_order).grid(row=4, column=0, pady=(5, 2), sticky="ew", padx=5)
         self.peek_var = tk.StringVar(value="Next up: —")
-        ttk.Label(
-            frame,
-            textvariable=self.peek_var,
-            style="Queue.TLabel",
-            width=64,
-            anchor="w",
-            justify="left",
-            wraplength=300,
-        ).grid(row=5, column=0, pady=(0, 5), sticky="w", padx=5)
+        ttk.Label(frame, textvariable=self.peek_var, style="Queue.TLabel", width=96, anchor="w", justify="left", wraplength=500).grid(row=5, column=0, pady=(0, 5), sticky="w", padx=5)
+
+        # Current cooking order
+        self.current_order_var = tk.StringVar(value="Nothing is cooking right now.")
+        ttk.Label(frame, text="🔥 Cooking Now:", style="Accent.TLabel").grid(row=6, column=0, sticky="w", padx=5, pady=(5, 2))
+        ttk.Label(frame, textvariable=self.current_order_var, style="Queue.TLabel", width=96, anchor="w", justify="left", wraplength=500).grid(row=7, column=0, pady=(0, 5), sticky="w", padx=5)
 
         # Cooking progress bar and label
         self.progress_bar = ttk.Progressbar(frame, style="Kitchen.Horizontal.TProgressbar", orient="horizontal", mode="determinate", maximum=100)
-        self.progress_bar.grid(row=6, column=0, columnspan=1, padx=5, pady=(5, 2), sticky="ew")
+        self.progress_bar.grid(row=8, column=0, columnspan=1, padx=5, pady=(5, 2), sticky="ew")
         self.progress_label = ttk.Label(frame, text="Progress: 0%", style="Queue.TLabel")
-        self.progress_label.grid(row=7, column=0, pady=(2, 5), sticky="e", padx=10)
-        frame.rowconfigure(7, weight=0)
+        self.progress_label.grid(row=9, column=0, pady=(2, 5), sticky="e", padx=10)
+        frame.rowconfigure(9, weight=0)
 
     def setup_queue_status_ui(self) -> None:
         frame = ttk.LabelFrame(self.root, text="Order Status")
@@ -379,16 +377,29 @@ class RestaurantOrderApp:
         self.progress_bar['value'] = pct
         self.progress_label['text'] = f"Progress: {pct}%"
 
+    def _schedule_current_order_update(self, order: Order) -> None:
+        """Schedule the UI update to show the current cooking order."""
+        self._safe_after(0, lambda: self._update_current_order(order))
+
+    def _update_current_order(self, order: Order) -> None:
+        """Update the cooking-now display and remove the order from pending."""
+        self.current_order_var.set(f"🍽️{order.description}")
+
+        # Remove order from pending list now that it is being cooked
+        for i in range(self.kitchen_list.size()):
+            if f"[#{order.order_id}]" in self.kitchen_list.get(i):
+                self.kitchen_list.delete(i)
+                break
+
     def _schedule_order_done(self, order: Order) -> None:
         """Schedule the UI update to mark an order done."""
         self._safe_after(0, lambda: self._mark_order_done(order))
 
     def _mark_order_done(self, order: Order) -> None:
-        """Remove the pending entry matching the order id and append to processed."""
-        for i in range(self.kitchen_list.size()):
-            if f"[#{order.order_id}]" in self.kitchen_list.get(i):
-                self.kitchen_list.delete(i)
-                break
+        """Remove the current cooking order and append it to processed."""
+        self.current_order_var.set("Nothing is cooking right now.")
+        self.progress_bar['value'] = 0
+        self.progress_label['text'] = "Progress: 0%"
 
         self.processed_list.insert(tk.END, order.description)
         self.processed_list.see(tk.END)

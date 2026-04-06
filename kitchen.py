@@ -31,12 +31,14 @@ class KitchenWorker:
         order_queue: BasicMessageQueue,
         processing_delay: float = 10.0,
         status_callback: Optional[Callable[[str], None]] = None,
+        order_started_callback: Optional[Callable[[Order], None]] = None,
         order_done_callback: Optional[Callable[[Order], None]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ):
         self.order_queue = order_queue
         self.processing_delay = processing_delay
         self.status_callback = status_callback
+        self.order_started_callback = order_started_callback
         self.order_done_callback = order_done_callback
         self.progress_callback = progress_callback
         self.running = False
@@ -67,7 +69,8 @@ class KitchenWorker:
                 if not isinstance(body, Order):
                     continue
 
-                # Notify observers that the kitchen is busy
+                # Notify observers that the kitchen is busy and a new order is starting
+                self._notify_order_started(body)
                 self._notify_status(f"🍕 Cooking {body.dish}…")
                 self._notify_progress(0.0)
 
@@ -97,6 +100,14 @@ class KitchenWorker:
                 self.status_callback(status)
             except Exception:
                 # Callbacks should not crash the worker
+                pass
+
+    def _notify_order_started(self, order: Order) -> None:
+        """Invoke the order-started callback if provided."""
+        if callable(self.order_started_callback):
+            try:
+                self.order_started_callback(order)
+            except Exception:
                 pass
 
     def _notify_order_done(self, order: Order) -> None:
